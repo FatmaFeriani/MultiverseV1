@@ -1,6 +1,12 @@
-import socket
+import os
+import shutil
+
+import grpc
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
+
+import multiverse_pb2
+import multiverse_pb2_grpc
 
 BG_DARK = "#1e1e2e"
 BG_PANEL = "#f4f5f7"
@@ -16,6 +22,8 @@ FONT_TITLE = ("Segoe UI", 13, "bold")
 FONT_LABEL = ("Segoe UI", 10)
 FONT_STATUS = ("Segoe UI", 10, "bold")
 FONT_BTN = ("Segoe UI", 9, "bold")
+
+GRPC_TIMEOUT_SECONDS = 2
 
 
 def make_button(parent, text, color, hover, command, width=14):
@@ -45,7 +53,7 @@ class ConnectionPanel(ttk.LabelFrame):
         port_label = ttk.Label(self, text="Port:")
         port_label.grid(row=0, column=2, sticky="w", padx=(12, 6), pady=3)
 
-        self.port_var = tk.StringVar(value="1234")
+        self.port_var = tk.StringVar(value="8080")
         self.port_entry = ttk.Entry(self, textvariable=self.port_var, width=8)
         self.port_entry.grid(row=0, column=3, sticky="w", pady=3)
 
@@ -57,10 +65,10 @@ class ConnectionPanel(ttk.LabelFrame):
 
     def toggle_connection(self):
         app = self.winfo_toplevel()
-        if getattr(app, "backend_socket", None) is None:
+        if getattr(app, "backend_stub", None) is None:
             host = self.host_var.get().strip() or "127.0.0.1"
             try:
-                port = int(self.port_var.get().strip() or "1234")
+                port = int(self.port_var.get().strip() or "8080")
             except ValueError:
                 self.connection_label.config(text="Invalid port", foreground=RED)
                 return
@@ -81,7 +89,6 @@ class ConnectionPanel(ttk.LabelFrame):
             self.port_entry.config(state="normal")
 
 
-# pcu
 class PowerPanel(ttk.LabelFrame):
     def __init__(self, parent):
         super().__init__(parent, text="  ", padding=12, style="Card.TLabelframe")
@@ -168,14 +175,15 @@ class PowerPanel(ttk.LabelFrame):
             self.acti_status.config(text="Status: OFF", foreground=RED)
         app.update_command_status(response)
 
-
-
-
 class PcapPanel(ttk.LabelFrame):
     def __init__(self, parent):
         super().__init__(parent, text="  ", padding=12, style="Card.TLabelframe")
 
         self.pcap_state = "STOPPED"
+        self.last_pcap_path = ""
+        self.last_download_path = ""
+        self.last_download_name = ""
+        self.downloaded_pcap_paths = []
         self._build_ui()
 
     def _build_ui(self):
@@ -191,12 +199,25 @@ class PcapPanel(ttk.LabelFrame):
         make_button(pcap_frame, "STOP", RED, RED_H, self.stop).grid(row=2, column=0, pady=3)
         make_button(pcap_frame, "NAME", GREY, "#607d8b", self.name).grid(row=3, column=0, pady=3)
 
+        self.download_button = make_button(pcap_frame, "DOWNLOAD", GREY, "#607d8b", self.download)
+        self.download_button.grid(row=4, column=0, pady=3)
+        self.download_button.config(state="disabled")
+
+        self.cleanup_button = make_button(pcap_frame, "CLEANUP", RED, RED_H, self.cleanup)
+        self.cleanup_button.grid(row=5, column=0, pady=3)
+        self.cleanup_button.config(state="disabled")
+
     def start(self):
         app = self.winfo_toplevel()
         response = app.send_command_to_backend("PCAP START")
         if response.startswith("OK"):
             self.pcap_state = "STARTED"
             self.pcap_status.config(text="Status: started", foreground=GREEN)
+            messagebox.showinfo(
+                "Capture launched",
+                "Capture started (2 GiB max file size).",
+                parent=app,
+            )
         app.update_command_status(response)
 
     def stop(self):
@@ -210,20 +231,109 @@ class PcapPanel(ttk.LabelFrame):
 
     def name(self):
         app = self.winfo_toplevel()
+        if self.pcap_state == "STARTED":
+            stop_response = app.send_command_to_backend("PCAP STOP")
+            if stop_response.startswith("OK"):
+                self.pcap_state = "STOPPED"
+                self.pcap_status.config(text="Status: stopped", foreground=RED)
+                self.start_button.config(state="disabled")
+
         filename = filedialog.asksaveasfilename(
-            title="Choose PCAP output file",
+            title="Choose remote PCAP output file name",
             defaultextension=".pcap",
             filetypes=[("PCAP files", "*.pcap"), ("All files", "*.*")],
         )
         if not filename:
-            return  # user cancelled
+            return
 
-        response = app.send_command_to_backend(f"PCAP NAME {filename}")
+        remote_name = os.path.basename(filename)
+        if remote_name not in self.downloaded_pcap_paths:
+            self.downloaded_pcap_paths.append(remote_name)
+        response = app.send_command_to_backend(f"PCAP NAME {remote_name}")
         if response.startswith("OK"):
+            self.last_pcap_path = remote_name
+            self.last_download_name = remote_name
             self.pcap_state = "NAME"
-            self.pcap_status.config(text=f"Status: name set ({filename})", foreground=GREEN)
+            self.pcap_status.config(text=f"Status: name set ({remote_name})", foreground=GREEN)
             self.start_button.config(state="normal")
+            self.download_button.config(state="normal")
+            self.cleanup_button.config(state="normal")
         app.update_command_status(response)
+
+    def download(self):
+        app = self.winfo_toplevel()
+        if not self.last_pcap_path:
+            app.update_command_status("ERROR No remote PCAP file is available to download")
+            return
+
+        target = os.path.join(os.getcwd(), self.last_pcap_path)
+
+        try:
+            reply = app.backend_stub.PcapGet(
+                multiverse_pb2.PcapNameRequest(name=self.last_pcap_path),
+                timeout=GRPC_TIMEOUT_SECONDS,
+            )
+        except grpc.RpcError as exc:
+            app.disconnect_backend()
+            app.connection_panel.connection_label.config(text="Not connected", foreground=RED)
+            app.connection_panel.connect_button.config(text="Connect")
+            app.connection_panel.host_entry.config(state="normal")
+            app.connection_panel.port_entry.config(state="normal")
+            detail = exc.details() or str(exc.code())
+            app.update_command_status(f"ERROR {detail}")
+            return
+
+        try:
+            with open(target, "wb") as out_file:
+                out_file.write(reply.content)
+        except OSError as exc:
+            app.update_command_status(f"ERROR Could not save downloaded PCAP file: {exc}")
+            return
+
+        self.last_download_path = target
+        self.last_download_name = self.last_pcap_path
+        if target not in self.downloaded_pcap_paths:
+            self.downloaded_pcap_paths.append(target)
+        app.update_command_status(f"OK Downloaded PCAP to {target}")
+
+    def cleanup(self):
+        app = self.winfo_toplevel()
+        if not self.downloaded_pcap_paths and not self.last_download_path and not self.last_pcap_path:
+            app.update_command_status("ERROR No PCAP file is available to clean up")
+            return
+
+        remote_name = self.last_pcap_path or self.last_download_name
+        if remote_name:
+            remote_response = app.send_command_to_backend(f"PCAP DELETE {remote_name}")
+            if not remote_response.startswith("OK"):
+                app.update_command_status(remote_response)
+                return
+
+        removed_any = False
+        errors = []
+
+        for download_path in list(self.downloaded_pcap_paths):
+            try:
+                if os.path.exists(download_path):
+                    os.remove(download_path)
+                    removed_any = True
+            except OSError as exc:
+                errors.append(str(exc))
+
+        if errors:
+            app.update_command_status(f"ERROR Could not clean up PCAP files: {'; '.join(errors)}")
+            return
+
+        self.downloaded_pcap_paths = []
+        self.last_download_path = ""
+        self.last_download_name = ""
+        self.last_pcap_path = ""
+        self.pcap_state = "STOPPED"
+        self.pcap_status.config(text="Status: stopped", foreground=RED)
+        self.start_button.config(state="disabled")
+        self.download_button.config(state="disabled")
+        self.cleanup_button.config(state="disabled")
+        app.update_command_status("OK PCAP files cleaned up" if removed_any else "OK No PCAP files to clean up")
 
 
 class Multiverse(tk.Tk):
@@ -234,9 +344,11 @@ class Multiverse(tk.Tk):
         self.configure(bg=BG_DARK)
         self.minsize(880, 700)
 
-        self.backend_socket = None
+        
+        self.backend_channel = None
+        self.backend_stub = None
         self.backend_host = "127.0.0.1"
-        self.backend_port = 1234
+        self.backend_port = 8080
 
         self._setup_style()
 
@@ -279,26 +391,32 @@ class Multiverse(tk.Tk):
         style.configure("TScrollbar", background=BG_PANEL)
 
     def connect_backend(self, host: str, port: int) -> str:
+        target = f"{host}:{port}"
         try:
-            sock = socket.create_connection((host, port), timeout=2)
-            self.backend_socket = sock
-            self.backend_host = host
-            self.backend_port = port
-            return f"OK Connected to {host}:{port}"
-        except OSError as exc:
-            self.backend_socket = None
+            channel = grpc.insecure_channel(target)
+            grpc.channel_ready_future(channel).result(timeout=2)
+        except grpc.FutureTimeoutError:
+            return f"ERROR Could not reach {target}"
+        except Exception as exc:  
             return f"ERROR {exc}"
 
+        self.backend_channel = channel
+        self.backend_stub = multiverse_pb2_grpc.MultiverseStub(channel)
+        self.backend_host = host
+        self.backend_port = port
+        return f"OK Connected to {host}:{port}"
+
     def disconnect_backend(self):
-        if self.backend_socket is not None:
+        if self.backend_channel is not None:
             try:
-                self.backend_socket.close()
-            except OSError:
+                self.backend_channel.close()
+            except Exception:  
                 pass
-            self.backend_socket = None
+            self.backend_channel = None
+            self.backend_stub = None
 
     def ensure_backend_connected(self) -> str:
-        if self.backend_socket is not None:
+        if self.backend_stub is not None:
             return "OK Already connected"
 
         host = self.connection_panel.host_var.get().strip() or self.backend_host
@@ -317,22 +435,69 @@ class Multiverse(tk.Tk):
         return response
 
     def send_command_to_backend(self, command: str) -> str:
-        if self.backend_socket is None:
+       
+        if self.backend_stub is None:
             response = self.ensure_backend_connected()
             if not response.startswith("OK"):
                 return response
 
         try:
-            self.backend_socket.sendall((command.strip() + "\n").encode("utf-8"))
-            response = self.backend_socket.recv(1024).decode("utf-8", errors="replace").strip()
-            return response or "No response from backend"
-        except OSError as exc:
+            parts = command.strip().split(" ", 1)
+            cmd = parts[0]
+            arg = parts[1] if len(parts) > 1 else ""
+
+            if cmd == "POWER":
+                reply = self.backend_stub.SetPower(
+                    multiverse_pb2.PowerRequest(on=(arg == "1")),
+                    timeout=GRPC_TIMEOUT_SECONDS,
+                )
+            elif cmd == "WAKE-UP":
+                reply = self.backend_stub.SetWakeUp(
+                    multiverse_pb2.WakeUpRequest(on=(arg == "1")),
+                    timeout=GRPC_TIMEOUT_SECONDS,
+                )
+            elif cmd == "ACTI-LINE":
+                reply = self.backend_stub.SetActiLine(
+                    multiverse_pb2.ActiLineRequest(on=(arg == "1")),
+                    timeout=GRPC_TIMEOUT_SECONDS,
+                )
+            elif cmd == "PCAP":
+                sub_parts = arg.split(" ", 1)
+                sub = sub_parts[0]
+                sub_arg = sub_parts[1] if len(sub_parts) > 1 else ""
+                if sub == "START":
+                    reply = self.backend_stub.PcapStart(
+                        multiverse_pb2.Empty(), timeout=GRPC_TIMEOUT_SECONDS
+                    )
+                elif sub == "STOP":
+                    reply = self.backend_stub.PcapStop(
+                        multiverse_pb2.Empty(), timeout=GRPC_TIMEOUT_SECONDS
+                    )
+                elif sub == "NAME":
+                    reply = self.backend_stub.PcapSetName(
+                        multiverse_pb2.PcapNameRequest(name=sub_arg),
+                        timeout=GRPC_TIMEOUT_SECONDS,
+                    )
+                elif sub == "DELETE":
+                    reply = self.backend_stub.PcapDelete(
+                        multiverse_pb2.PcapNameRequest(name=sub_arg),
+                        timeout=GRPC_TIMEOUT_SECONDS,
+                    )
+                else:
+                    return "ERROR Unknown PCAP subcommand"
+            else:
+                return "ERROR Unknown command"
+
+            return reply.message
+
+        except grpc.RpcError as exc:
             self.disconnect_backend()
             self.connection_panel.connection_label.config(text="Not connected", foreground=RED)
             self.connection_panel.connect_button.config(text="Connect")
             self.connection_panel.host_entry.config(state="normal")
             self.connection_panel.port_entry.config(state="normal")
-            return f"ERROR {exc}"
+            detail = exc.details() or str(exc.code())
+            return f"ERROR {detail}"
 
     def update_command_status(self, response: str):
         self.response_label.config(text=f"Backend: {response}")

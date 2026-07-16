@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package multiverse;
+
+
+service Multiverse {
+  rpc SetPower(PowerRequest) returns (CommandReply);
+  rpc SetWakeUp(WakeUpRequest) returns (CommandReply);
+  rpc SetActiLine(ActiLineRequest) returns (CommandReply);
+
+  rpc PcapStart(Empty) returns (CommandReply);
+  rpc PcapStop(Empty) returns (CommandReply);
+  rpc PcapSetName(PcapNameRequest) returns (CommandReply);
+  rpc PcapDelete(PcapNameRequest) returns (CommandReply);
+  rpc PcapGet(PcapNameRequest) returns (PcapFileReply);
+}
+
+message PowerRequest {
+  bool on = 1; // true = POWER 1 (ON), false = POWER 0 (OFF)
+}
+
+message WakeUpRequest {
+  bool on = 1; // true = WAKE-UP 1, false = WAKE-UP 0
+}
+
+message ActiLineRequest {
+  bool on = 1; // true = ACTI-LINE 1, false = ACTI-LINE 0
+}
+
+message PcapNameRequest {
+  string name = 1;
+}
+
+message PcapFileReply {
+  string filename = 1;
+  bytes content = 2;
+}
+
+message Empty {}
+
+message CommandReply {
+  bool ok = 1;
+  string message = 2;
+}

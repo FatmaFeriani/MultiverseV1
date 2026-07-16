@@ -3,9 +3,18 @@ name = "backend"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "backend"
+path = "src/main.rs"
+
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-axum = "0.8.9"
+tokio = { version = "1.35", features = ["full"] }
+tonic = "0.14.6"
+prost = "0.14.4"
+tonic-prost = "0.14.6"
 chrono = "0.4"
 caps = "0.5"
 libc = "0.2"
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
