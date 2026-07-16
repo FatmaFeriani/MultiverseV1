@@ -1,0 +1,40 @@
+# Build artifacts
+/target/
+/backend/target/
+
+# Rust/Cargo
+**/target/
+ Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Logs and state files
+*.log
+command_log.txt
+pcap_state.txt
+pcu_state.txt
+wakeup_state.txt
+acti_state.txt
+*.pcap
+
+# Editor and IDE
+.vscode/
+*.code-workspace
+.idea/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc
+*.sqlite3
+*.db
