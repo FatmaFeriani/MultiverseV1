@@ -1,5 +1,7 @@
+#!/usr/bin/env python3
 import os
 import shutil
+import json
 
 import grpc
 import tkinter as tk
@@ -24,6 +26,36 @@ FONT_STATUS = ("Segoe UI", 10, "bold")
 FONT_BTN = ("Segoe UI", 9, "bold")
 
 GRPC_TIMEOUT_SECONDS = 2
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+DEFAULT_CONFIG = {
+    "listener": {
+        "ethernet": {"enabled": True, "priority": 1, "ip": "127.0.0.1", "port": 8080},
+        "wifi": {"enabled": True, "priority": 2, "ip": "127.0.0.1", "port": 8080},
+    },
+    "pcap_parameters": {"if_name": "lo", "size_mb": 2048, "slices": 1},
+}
+
+
+def load_config():
+    """Load the shared frontend/backend configuration, with safe UI defaults."""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            return json.load(config_file)
+    except (OSError, json.JSONDecodeError):
+        return DEFAULT_CONFIG
+
+
+def active_listener(config):
+    """Return the enabled listener with the lowest priority number."""
+    listeners = [
+        listener
+        for listener in config["listener"].values()
+        if listener.get("enabled", False)
+    ]
+    if not listeners:
+        raise ValueError("config.json must enable at least one listener")
+    return min(listeners, key=lambda listener: listener.get("priority", float("inf")))
 
 
 def make_button(parent, text, color, hover, command, width=14):
@@ -43,25 +75,56 @@ class ConnectionPanel(ttk.LabelFrame):
         self._build_ui()
 
     def _build_ui(self):
-        host_label = ttk.Label(self, text="IP:")
-        host_label.grid(row=0, column=0, sticky="w", padx=(0, 6), pady=3)
-
-        self.host_var = tk.StringVar(value="127.0.0.1")
+        listener = active_listener(self.winfo_toplevel().config)
+        self.host_var = tk.StringVar(value=str(listener["ip"]))
+        self.host_label = ttk.Label(self, text="IP:")
+        self.host_label.grid(row=1, column=0, sticky="w", padx=(0, 6), pady=3)
         self.host_entry = ttk.Entry(self, textvariable=self.host_var, width=18)
-        self.host_entry.grid(row=0, column=1, sticky="w", pady=3)
+        self.host_entry.grid(row=1, column=1, sticky="w", pady=3)
 
-        port_label = ttk.Label(self, text="Port:")
-        port_label.grid(row=0, column=2, sticky="w", padx=(12, 6), pady=3)
-
-        self.port_var = tk.StringVar(value="8080")
+        self.port_var = tk.StringVar(value=str(listener["port"]))
+        self.port_label = ttk.Label(self, text="Port:")
+        self.port_label.grid(row=1, column=2, sticky="w", padx=(12, 6), pady=3)
         self.port_entry = ttk.Entry(self, textvariable=self.port_var, width=8)
-        self.port_entry.grid(row=0, column=3, sticky="w", pady=3)
+        self.port_entry.grid(row=1, column=3, sticky="w", pady=3)
 
         self.connect_button = make_button(self, "Connect", GREEN, GREEN_H, self.toggle_connection, width=12)
-        self.connect_button.grid(row=0, column=4, padx=(12, 0), pady=3)
+        self.connect_button.grid(row=0, column=0, padx=(0, 8), pady=3)
+
+        self.params_button = make_button(self, "Params", GREY, "#607d8b", self.toggle_params, width=10)
+        self.params_button.grid(row=0, column=1, pady=3, sticky="w")
 
         self.connection_label = ttk.Label(self, text="Not connected", foreground=RED, font=FONT_STATUS)
-        self.connection_label.grid(row=1, column=0, columnspan=5, sticky="w", pady=(8, 0))
+        self.connection_label.grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        self.params_visible = True
+        self.toggle_params()
+
+    def toggle_params(self):
+        widgets = (self.host_label, self.host_entry, self.port_label, self.port_entry)
+        self.params_visible = not self.params_visible
+        if self.params_visible:
+            for widget in widgets:
+                widget.grid()
+            self.params_button.config(text="Hide params")
+        else:
+            for widget in widgets:
+                widget.grid_remove()
+            self.params_button.config(text="Params")
+            if self._connection_differs_from_json():
+                messagebox.showwarning(
+                    "JSON reminder",
+                    "IP/port changed in the frontend. Update config.json too, then restart the backend to apply the listener change.",
+                    parent=self.winfo_toplevel(),
+                )
+
+    def _connection_differs_from_json(self):
+        listener = active_listener(self.winfo_toplevel().config)
+        try:
+            port = int(self.port_var.get().strip())
+        except ValueError:
+            return True
+        return self.host_var.get().strip() != str(listener["ip"]) or port != int(listener["port"])
 
     def toggle_connection(self):
         app = self.winfo_toplevel()
@@ -72,6 +135,13 @@ class ConnectionPanel(ttk.LabelFrame):
             except ValueError:
                 self.connection_label.config(text="Invalid port", foreground=RED)
                 return
+
+            if self._connection_differs_from_json():
+                messagebox.showwarning(
+                    "JSON reminder",
+                    "IP/port changed for this connection. Update config.json too, then restart the backend to apply the listener change.",
+                    parent=app,
+                )
 
             response = app.connect_backend(host, port)
             if response.startswith("OK"):
@@ -266,6 +336,12 @@ class PcapPanel(ttk.LabelFrame):
             app.update_command_status("ERROR No remote PCAP file is available to download")
             return
 
+        if app.backend_stub is None:
+            response = app.ensure_backend_connected()
+            if not response.startswith("OK"):
+                app.update_command_status(response)
+                return
+
         target = os.path.join(os.getcwd(), self.last_pcap_path)
 
         try:
@@ -274,12 +350,13 @@ class PcapPanel(ttk.LabelFrame):
                 timeout=GRPC_TIMEOUT_SECONDS,
             )
         except grpc.RpcError as exc:
-            app.disconnect_backend()
-            app.connection_panel.connection_label.config(text="Not connected", foreground=RED)
-            app.connection_panel.connect_button.config(text="Connect")
-            app.connection_panel.host_entry.config(state="normal")
-            app.connection_panel.port_entry.config(state="normal")
             detail = exc.details() or str(exc.code())
+            if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
+                app.disconnect_backend()
+                app.connection_panel.connection_label.config(text="Not connected", foreground=RED)
+                app.connection_panel.connect_button.config(text="Connect")
+                app.connection_panel.host_entry.config(state="normal")
+                app.connection_panel.port_entry.config(state="normal")
             app.update_command_status(f"ERROR {detail}")
             return
 
@@ -349,6 +426,7 @@ class Multiverse(tk.Tk):
         self.backend_stub = None
         self.backend_host = "127.0.0.1"
         self.backend_port = 8080
+        self.config = load_config()
 
         self._setup_style()
 

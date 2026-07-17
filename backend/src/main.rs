@@ -1,19 +1,19 @@
-use std::env;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use caps::{CapSet, Capability};
-use tonic::{transport::Server, Request, Response, Status};
+use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-
+use tonic::{transport::Server, Request, Response, Status};
 
 pub mod multiverse {
     tonic::include_proto!("multiverse");
@@ -31,10 +31,83 @@ const ACT: &str = "acti_state.txt";
 const PCAP: &str = "pcap_state.txt";
 const LOG_FILE: &str = "command_log.txt";
 
-const CAPTURE_IFACE: &str = "lo";
 const DEFAULT_PCAP_NAME: &str = "capture.pcap";
-const CAPTURE_MAX_SIZE_MB: &str = "2048";
-const CAPTURE_ROTATION_FILES: &str = "1";
+const CONFIG_FILE: &str = "config.json";
+
+#[derive(Clone, Deserialize)]
+struct AppConfig {
+    listener: ListenerConfig,
+    pcap_parameters: CaptureParameters,
+}
+
+#[derive(Clone, Deserialize)]
+struct ListenerConfig {
+    ethernet: NetworkInterfaceConfig,
+    wifi: NetworkInterfaceConfig,
+}
+
+#[derive(Clone, Deserialize)]
+struct NetworkInterfaceConfig {
+    enabled: bool,
+    priority: u8,
+    ip: String,
+    port: u16,
+}
+
+impl ListenerConfig {
+    fn active(&self) -> Result<&NetworkInterfaceConfig, String> {
+        [&self.ethernet, &self.wifi]
+            .into_iter()
+            .filter(|listener| listener.enabled)
+            .min_by_key(|listener| listener.priority)
+            .ok_or_else(|| "au moins ethernet ou wifi doit etre active".to_string())
+    }
+}
+
+#[derive(Clone, Deserialize)]
+struct CaptureParameters {
+    if_name: String,
+    size_mb: u32,
+    slices: u8,
+}
+
+fn config_path() -> Result<PathBuf, String> {
+    let local = PathBuf::from(CONFIG_FILE);
+    if local.is_file() {
+        return Ok(local);
+    }
+
+    let parent = PathBuf::from("..").join(CONFIG_FILE);
+    if parent.is_file() {
+        return Ok(parent);
+    }
+
+    Err(format!("{} introuvable", CONFIG_FILE))
+}
+
+fn load_config() -> Result<AppConfig, String> {
+    let path = config_path()?;
+    let content = fs::read_to_string(&path)
+        .map_err(|err| format!("lecture de {} impossible: {}", path.display(), err))?;
+    let config: AppConfig = serde_json::from_str(&content)
+        .map_err(|err| format!("JSON invalide dans {}: {}", path.display(), err))?;
+
+    let listener = config.listener.active()?;
+    if listener.ip.parse::<IpAddr>().is_err() {
+        return Err(format!("listener IP invalide: {}", listener.ip));
+    }
+    if config.pcap_parameters.if_name.trim().is_empty() {
+        return Err("pcap_parameters.if_name ne peut pas etre vide".to_string());
+    }
+    if config.pcap_parameters.size_mb == 0 {
+        return Err("pcap_parameters.size_mb doit etre superieur a 0".to_string());
+    }
+    if !(1..=5).contains(&config.pcap_parameters.slices) {
+        return Err("pcap_parameters.slices doit etre compris entre 1 et 5".to_string());
+    }
+
+    Ok(config)
+}
 
 fn write_state(path: &str, state: &str) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create(true).open(path)?;
@@ -43,32 +116,11 @@ fn write_state(path: &str, state: &str) -> io::Result<()> {
 }
 
 fn append_log(entry: &str) -> io::Result<()> {
-    let mut file = OpenOptions::new().append(true).create(true).open(LOG_FILE)?;
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(LOG_FILE)?;
     writeln!(file, "{}", entry)
-}
-
-fn parse_bind_addr_from(args: &[String]) -> Result<SocketAddr, String> {
-    let host = args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| "8080".to_string());
-
-    let port = port
-        .parse::<u16>()
-        .map_err(|e| format!("invalid port '{}': {}", port, e))?;
-
-    format!("{}:{}", host, port)
-        .parse::<SocketAddr>()
-        .map_err(|e| format!("invalid bind address '{}:{}': {}", host, port, e))
-}
-
-fn parse_bind_addr() -> Result<SocketAddr, String> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    parse_bind_addr_from(&args)
 }
 
 fn reply_from(res: io::Result<()>, msg: &str) -> CommandReply {
@@ -95,14 +147,16 @@ struct AppState {
     pcap_child: Arc<RwLock<Option<Child>>>,
     pcap_name: Arc<RwLock<String>>,
     pcap_name_set: Arc<RwLock<bool>>,
+    capture: CaptureParameters,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(capture: CaptureParameters) -> Self {
         AppState {
             pcap_child: Arc::new(RwLock::new(None)),
             pcap_name: Arc::new(RwLock::new(DEFAULT_PCAP_NAME.to_string())),
             pcap_name_set: Arc::new(RwLock::new(false)),
+            capture,
         }
     }
 }
@@ -139,9 +193,8 @@ async fn start_pcap(state: &Arc<AppState>) -> CommandReply {
     if !*state.pcap_name_set.read().await {
         return CommandReply {
             ok: false,
-            message:
-                "ERR PCAP START: nom de fichier non defini, utiliser PcapSetName d'abord"
-                    .to_string(),
+            message: "ERR PCAP START: nom de fichier non defini, utiliser PcapSetName d'abord"
+                .to_string(),
         };
     }
 
@@ -156,13 +209,13 @@ async fn start_pcap(state: &Arc<AppState>) -> CommandReply {
     let mut child = match TokioCommand::new("tcpdump")
         .args([
             "-i",
-            CAPTURE_IFACE,
+            &state.capture.if_name,
             "-w",
             &filename,
             "-C",
-            CAPTURE_MAX_SIZE_MB,
+            &state.capture.size_mb.to_string(),
             "-W",
-            CAPTURE_ROTATION_FILES,
+            &state.capture.slices.to_string(),
             "-U",
         ])
         .stdout(Stdio::null())
@@ -297,9 +350,53 @@ async fn delete_pcap(state: &Arc<AppState>, name: &str) -> CommandReply {
         }
         Err(err) => CommandReply {
             ok: false,
-            message: format!("ERR PCAP DELETE: impossible de supprimer {}: {}", filename, err),
+            message: format!(
+                "ERR PCAP DELETE: impossible de supprimer {}: {}",
+                filename, err
+            ),
         },
     }
+}
+
+/// `tcpdump -C ... -W ...` writes rotated captures as `<name>0`,
+/// `<name>1`, and so on.  Prefer an exact file name, but otherwise return
+/// the most recently modified rotated file for the configured capture name.
+async fn resolve_pcap_file(state: &Arc<AppState>, requested_name: &str) -> Result<PathBuf, Status> {
+    let configured_name = state.pcap_name.read().await.clone();
+    if requested_name != configured_name {
+        return Err(Status::not_found(format!(
+            "PCAP GET: {} is not the configured capture file",
+            requested_name
+        )));
+    }
+
+    let exact_path = PathBuf::from(&configured_name);
+    if exact_path.is_file() {
+        return Ok(exact_path);
+    }
+
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for slice in 0..state.capture.slices {
+        let candidate = PathBuf::from(format!("{}{}", configured_name, slice));
+        let modified = match fs::metadata(&candidate).and_then(|metadata| metadata.modified()) {
+            Ok(modified) => modified,
+            Err(_) => continue,
+        };
+
+        if newest
+            .as_ref()
+            .map_or(true, |(latest, _)| modified > *latest)
+        {
+            newest = Some((modified, candidate));
+        }
+    }
+
+    newest.map(|(_, path)| path).ok_or_else(|| {
+        Status::not_found(format!(
+            "PCAP GET: could not find {} or any rotated capture files",
+            configured_name
+        ))
+    })
 }
 
 pub struct MultiverseService {
@@ -313,12 +410,17 @@ impl Multiverse for MultiverseService {
         request: Request<PcapNameRequest>,
     ) -> Result<Response<PcapFileReply>, Status> {
         let name = request.into_inner().name;
-        let content = fs::read(&name).map_err(|e| {
-            Status::not_found(format!("PCAP GET: could not read {}: {}", name, e))
+        let path = resolve_pcap_file(&self.state, name.trim()).await?;
+        let content = fs::read(&path).map_err(|e| {
+            Status::internal(format!(
+                "PCAP GET: could not read {}: {}",
+                path.display(),
+                e
+            ))
         })?;
 
         Ok(Response::new(PcapFileReply {
-            filename: name.clone(),
+            filename: path.to_string_lossy().into_owned(),
             content,
         }))
     }
@@ -365,20 +467,20 @@ impl Multiverse for MultiverseService {
         )))
     }
 
-    async fn pcap_start(
-        &self,
-        _request: Request<Empty>,
-    ) -> Result<Response<CommandReply>, Status> {
+    async fn pcap_start(&self, _request: Request<Empty>) -> Result<Response<CommandReply>, Status> {
         let reply = start_pcap(&self.state).await;
-        Ok(Response::new(log_and_return("PCAP START".to_string(), reply)))
+        Ok(Response::new(log_and_return(
+            "PCAP START".to_string(),
+            reply,
+        )))
     }
 
-    async fn pcap_stop(
-        &self,
-        _request: Request<Empty>,
-    ) -> Result<Response<CommandReply>, Status> {
+    async fn pcap_stop(&self, _request: Request<Empty>) -> Result<Response<CommandReply>, Status> {
         let reply = stop_pcap(&self.state).await;
-        Ok(Response::new(log_and_return("PCAP STOP".to_string(), reply)))
+        Ok(Response::new(log_and_return(
+            "PCAP STOP".to_string(),
+            reply,
+        )))
     }
 
     async fn pcap_set_name(
@@ -408,13 +510,28 @@ impl Multiverse for MultiverseService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = parse_bind_addr().map_err(|err| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-    })?;
-    let state = Arc::new(AppState::new());
+    let config =
+        load_config().map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let listener = config
+        .listener
+        .active()
+        .expect("validated enabled listener");
+    let ip = listener
+        .ip
+        .parse::<IpAddr>()
+        .expect("validated listener IP");
+    let addr = SocketAddr::new(ip, listener.port);
+    let state = Arc::new(AppState::new(config.pcap_parameters));
     let service = MultiverseService { state };
 
     println!("Backend gRPC en ecoute sur {}", addr);
+    println!(
+        "Reseau: ethernet enabled={} priority={}, wifi enabled={} priority={}",
+        config.listener.ethernet.enabled,
+        config.listener.ethernet.priority,
+        config.listener.wifi.enabled,
+        config.listener.wifi.priority,
+    );
 
     Server::builder()
         .add_service(MultiverseServer::new(service))
@@ -423,4 +540,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

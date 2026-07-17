@@ -1,0 +1,23 @@
+{
+  "listener": {
+    "ethernet": {
+      "enabled": false,
+      "priority": 1,
+      "ip": "127.0.0.1",
+      "port": 8080
+    },
+    "wifi": {
+     "enabled": true,
+      "priority": 2,
+      "ip": "0.0.0.0",
+      "port": 1234
+    }
+  }
+  ,
+
+  "pcap_parameters": {
+    "if_name": "lo",
+    "size_mb": 2048,
+    "slices": 1
+  }
+}

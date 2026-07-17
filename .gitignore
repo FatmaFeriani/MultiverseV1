@@ -15,6 +15,13 @@ __pycache__/
 venv/
 env/
 
+# PyInstaller
+/build/
+/dist/
+/*.spec
+
+
+
 # Logs and state files
 *.log
 command_log.txt
