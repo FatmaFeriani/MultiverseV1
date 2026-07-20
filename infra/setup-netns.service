@@ -1,0 +1,14 @@
+[Unit]
+Description=Create netns/veth pairs for Multiverse simulation
+Before=NetworkManager.service
+DefaultDependencies=no
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-netns.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

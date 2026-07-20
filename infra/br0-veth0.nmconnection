@@ -1,0 +1,9 @@
+[connection]
+id=br0-veth0
+type=ethernet
+interface-name=veth0
+master=br0
+slave-type=bridge
+autoconnect=true
+
+[ethernet]

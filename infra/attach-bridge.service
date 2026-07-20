@@ -1,0 +1,12 @@
+[Unit]
+Description=Attach Multiverse veth interfaces to br0 after NetworkManager
+After=NetworkManager.service setup-netns.service
+Requires=NetworkManager.service setup-netns.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/attach-bridge.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
