@@ -29,10 +29,7 @@ GRPC_TIMEOUT_SECONDS = 2
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 DEFAULT_CONFIG = {
-    "listener": {
-        "ethernet": {"enabled": True, "priority": 1, "ip": "127.0.0.1", "port": 8080},
-        "wifi": {"enabled": True, "priority": 2, "ip": "127.0.0.1", "port": 8080},
-    },
+    "listener": {"ip": "127.0.0.1", "port": 8080},
     "pcap_parameters": {"if_name": "lo", "size_mb": 2048, "slices": 1},
 }
 
@@ -46,16 +43,9 @@ def load_config():
         return DEFAULT_CONFIG
 
 
-def active_listener(config):
-    """Return the enabled listener with the lowest priority number."""
-    listeners = [
-        listener
-        for listener in config["listener"].values()
-        if listener.get("enabled", False)
-    ]
-    if not listeners:
-        raise ValueError("config.json must enable at least one listener")
-    return min(listeners, key=lambda listener: listener.get("priority", float("inf")))
+def listener_config(config):
+    """Return the single listener shared by the backend and frontend."""
+    return config["listener"]
 
 
 def make_button(parent, text, color, hover, command, width=14):
@@ -75,8 +65,9 @@ class ConnectionPanel(ttk.LabelFrame):
         self._build_ui()
 
     def _build_ui(self):
-        listener = active_listener(self.winfo_toplevel().config)
+        listener = listener_config(self.winfo_toplevel().config)
         self.host_var = tk.StringVar(value=str(listener["ip"]))
+        self.network_var = tk.StringVar(value="ethernet")
         self.host_label = ttk.Label(self, text="IP:")
         self.host_label.grid(row=1, column=0, sticky="w", padx=(0, 6), pady=3)
         self.host_entry = ttk.Entry(self, textvariable=self.host_var, width=18)
@@ -88,38 +79,48 @@ class ConnectionPanel(ttk.LabelFrame):
         self.port_entry = ttk.Entry(self, textvariable=self.port_var, width=8)
         self.port_entry.grid(row=1, column=3, sticky="w", pady=3)
 
-        self.connect_button = make_button(self, "Connect", GREEN, GREEN_H, self.toggle_connection, width=12)
-        self.connect_button.grid(row=0, column=0, padx=(0, 8), pady=3)
+        ttk.Label(self, text="Interface:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=3)
+        self.ethernet_button = ttk.Radiobutton(
+            self, text="Ethernet", variable=self.network_var, value="ethernet"
+        )
+        self.ethernet_button.grid(row=0, column=1, sticky="w", pady=3)
+        self.wifi_button = ttk.Radiobutton(
+            self, text="Wi-Fi", variable=self.network_var, value="wifi"
+        )
+        self.wifi_button.grid(row=0, column=2, sticky="w", padx=(8, 12), pady=3)
 
-        self.params_button = make_button(self, "Params", GREY, "#607d8b", self.toggle_params, width=10)
-        self.params_button.grid(row=0, column=1, pady=3, sticky="w")
+        self.connect_button = make_button(self, "Connect", GREEN, GREEN_H, self.toggle_connection, width=12)
+        self.connect_button.grid(row=0, column=3, padx=(0, 8), pady=3)
+
+        self.advanced_button = make_button(self, "Advanced", GREY, "#607d8b", self.toggle_advanced, width=10)
+        self.advanced_button.grid(row=0, column=4, pady=3, sticky="w")
 
         self.connection_label = ttk.Label(self, text="Not connected", foreground=RED, font=FONT_STATUS)
-        self.connection_label.grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        self.connection_label.grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 0))
 
-        self.params_visible = True
-        self.toggle_params()
+        self.advanced_visible = True
+        self.toggle_advanced()
 
-    def toggle_params(self):
+    def toggle_advanced(self):
         widgets = (self.host_label, self.host_entry, self.port_label, self.port_entry)
-        self.params_visible = not self.params_visible
-        if self.params_visible:
+        self.advanced_visible = not self.advanced_visible
+        if self.advanced_visible:
             for widget in widgets:
                 widget.grid()
-            self.params_button.config(text="Hide params")
+            self.advanced_button.config(text="Hide advanced")
         else:
             for widget in widgets:
                 widget.grid_remove()
-            self.params_button.config(text="Params")
+            self.advanced_button.config(text="Advanced")
             if self._connection_differs_from_json():
                 messagebox.showwarning(
                     "JSON reminder",
-                    "IP/port changed in the frontend. Update config.json too, then restart the backend to apply the listener change.",
+                    "IP/port changed in the frontend. Update config.json and restart the backend to apply the listener change.",
                     parent=self.winfo_toplevel(),
                 )
 
     def _connection_differs_from_json(self):
-        listener = active_listener(self.winfo_toplevel().config)
+        listener = listener_config(self.winfo_toplevel().config)
         try:
             port = int(self.port_var.get().strip())
         except ValueError:
@@ -139,16 +140,21 @@ class ConnectionPanel(ttk.LabelFrame):
             if self._connection_differs_from_json():
                 messagebox.showwarning(
                     "JSON reminder",
-                    "IP/port changed for this connection. Update config.json too, then restart the backend to apply the listener change.",
+                    "IP/port changed for this connection. Update config.json and restart the backend to apply the listener change.",
                     parent=app,
                 )
 
             response = app.connect_backend(host, port)
             if response.startswith("OK"):
-                self.connection_label.config(text=f"Connected to {host}:{port}", foreground=GREEN)
+                self.connection_label.config(
+                    text=f"Connected via {self.network_var.get().title()} to {host}:{port}",
+                    foreground=GREEN,
+                )
                 self.connect_button.config(text="Disconnect")
                 self.host_entry.config(state="disabled")
                 self.port_entry.config(state="disabled")
+                self.ethernet_button.config(state="disabled")
+                self.wifi_button.config(state="disabled")
             else:
                 self.connection_label.config(text=response, foreground=RED)
         else:
@@ -157,6 +163,8 @@ class ConnectionPanel(ttk.LabelFrame):
             self.connect_button.config(text="Connect")
             self.host_entry.config(state="normal")
             self.port_entry.config(state="normal")
+            self.ethernet_button.config(state="normal")
+            self.wifi_button.config(state="normal")
 
 
 class PowerPanel(ttk.LabelFrame):
@@ -357,6 +365,8 @@ class PcapPanel(ttk.LabelFrame):
                 app.connection_panel.connect_button.config(text="Connect")
                 app.connection_panel.host_entry.config(state="normal")
                 app.connection_panel.port_entry.config(state="normal")
+                app.connection_panel.ethernet_button.config(state="normal")
+                app.connection_panel.wifi_button.config(state="normal")
             app.update_command_status(f"ERROR {detail}")
             return
 
@@ -506,10 +516,18 @@ class Multiverse(tk.Tk):
 
         response = self.connect_backend(host, port)
         if response.startswith("OK"):
-            self.connection_panel.connection_label.config(text=f"Connected to {host}:{port}", foreground=GREEN)
+            self.connection_panel.connection_label.config(
+                text=(
+                    f"Connected via {self.connection_panel.network_var.get().title()} "
+                    f"to {host}:{port}"
+                ),
+                foreground=GREEN,
+            )
             self.connection_panel.connect_button.config(text="Disconnect")
             self.connection_panel.host_entry.config(state="disabled")
             self.connection_panel.port_entry.config(state="disabled")
+            self.connection_panel.ethernet_button.config(state="disabled")
+            self.connection_panel.wifi_button.config(state="disabled")
         return response
 
     def send_command_to_backend(self, command: str) -> str:
@@ -574,6 +592,8 @@ class Multiverse(tk.Tk):
             self.connection_panel.connect_button.config(text="Connect")
             self.connection_panel.host_entry.config(state="normal")
             self.connection_panel.port_entry.config(state="normal")
+            self.connection_panel.ethernet_button.config(state="normal")
+            self.connection_panel.wifi_button.config(state="normal")
             detail = exc.details() or str(exc.code())
             return f"ERROR {detail}"
 

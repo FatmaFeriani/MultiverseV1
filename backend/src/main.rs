@@ -42,26 +42,8 @@ struct AppConfig {
 
 #[derive(Clone, Deserialize)]
 struct ListenerConfig {
-    ethernet: NetworkInterfaceConfig,
-    wifi: NetworkInterfaceConfig,
-}
-
-#[derive(Clone, Deserialize)]
-struct NetworkInterfaceConfig {
-    enabled: bool,
-    priority: u8,
     ip: String,
     port: u16,
-}
-
-impl ListenerConfig {
-    fn active(&self) -> Result<&NetworkInterfaceConfig, String> {
-        [&self.ethernet, &self.wifi]
-            .into_iter()
-            .filter(|listener| listener.enabled)
-            .min_by_key(|listener| listener.priority)
-            .ok_or_else(|| "au moins ethernet ou wifi doit etre active".to_string())
-    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -92,9 +74,8 @@ fn load_config() -> Result<AppConfig, String> {
     let config: AppConfig = serde_json::from_str(&content)
         .map_err(|err| format!("JSON invalide dans {}: {}", path.display(), err))?;
 
-    let listener = config.listener.active()?;
-    if listener.ip.parse::<IpAddr>().is_err() {
-        return Err(format!("listener IP invalide: {}", listener.ip));
+    if config.listener.ip.parse::<IpAddr>().is_err() {
+        return Err(format!("listener IP invalide: {}", config.listener.ip));
     }
     if config.pcap_parameters.if_name.trim().is_empty() {
         return Err("pcap_parameters.if_name ne peut pas etre vide".to_string());
@@ -512,27 +493,16 @@ impl Multiverse for MultiverseService {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config =
         load_config().map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-    let listener = config
+    let ip = config
         .listener
-        .active()
-        .expect("validated enabled listener");
-    let ip = listener
         .ip
         .parse::<IpAddr>()
         .expect("validated listener IP");
-    let addr = SocketAddr::new(ip, listener.port);
+    let addr = SocketAddr::new(ip, config.listener.port);
     let state = Arc::new(AppState::new(config.pcap_parameters));
     let service = MultiverseService { state };
 
     println!("Backend gRPC en ecoute sur {}", addr);
-    println!(
-        "Reseau: ethernet enabled={} priority={}, wifi enabled={} priority={}",
-        config.listener.ethernet.enabled,
-        config.listener.ethernet.priority,
-        config.listener.wifi.enabled,
-        config.listener.wifi.priority,
-    );
-
     Server::builder()
         .add_service(MultiverseServer::new(service))
         .serve(addr)
