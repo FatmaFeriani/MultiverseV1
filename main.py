@@ -29,7 +29,7 @@ GRPC_TIMEOUT_SECONDS = 2
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 DEFAULT_CONFIG = {
-    "listener": {"ip": "127.0.0.1", "port": 8080},
+    "listener": {"ip": "0.0.0.0", "port": 60000},
     "pcap_parameters": {"if_name": "lo", "size_mb": 2048, "slices": 1},
 }
 
@@ -130,11 +130,13 @@ class ConnectionPanel(ttk.LabelFrame):
     def toggle_connection(self):
         app = self.winfo_toplevel()
         if getattr(app, "backend_stub", None) is None:
-            host = self.host_var.get().strip() or "127.0.0.1"
+            host = self.host_var.get().strip() or "0.0.0.0"
             try:
-                port = int(self.port_var.get().strip() or "8080")
+                port = int(self.port_var.get().strip() or "60000")
             except ValueError:
+                response = "ERROR Invalid port"
                 self.connection_label.config(text="Invalid port", foreground=RED)
+                app.update_command_status(response)
                 return
 
             if self._connection_differs_from_json():
@@ -157,6 +159,7 @@ class ConnectionPanel(ttk.LabelFrame):
                 self.wifi_button.config(state="disabled")
             else:
                 self.connection_label.config(text=response, foreground=RED)
+                app.update_command_status(response)
         else:
             app.disconnect_backend()
             self.connection_label.config(text="Not connected", foreground=RED)
@@ -434,8 +437,8 @@ class Multiverse(tk.Tk):
         
         self.backend_channel = None
         self.backend_stub = None
-        self.backend_host = "127.0.0.1"
-        self.backend_port = 8080
+        self.backend_host = "0.0.0.0"
+        self.backend_port = 60000
         self.config = load_config()
 
         self._setup_style()
@@ -599,6 +602,10 @@ class Multiverse(tk.Tk):
 
     def update_command_status(self, response: str):
         self.response_label.config(text=f"Backend: {response}")
+        if response.startswith(("ERROR", "ERR")):
+            detail = response.removeprefix("ERROR").removeprefix("ERR").strip()
+            detail = detail or "An unknown error occurred."
+            messagebox.showerror("Operation failed", detail, parent=self)
 
 
 if __name__ == "__main__":
