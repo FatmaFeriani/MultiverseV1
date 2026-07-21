@@ -284,6 +284,20 @@ class PcapPanel(ttk.LabelFrame):
         self.download_button.grid(row=4, column=0, pady=3)
         self.download_button.config(state="disabled")
 
+        download_progress_frame = ttk.Frame(pcap_frame)
+        download_progress_frame.grid(row=4, column=1, padx=(10, 0), sticky="w")
+
+        self.download_size_label = ttk.Label(download_progress_frame, text="", font=FONT_LABEL)
+        self.download_size_label.grid(row=0, column=0, sticky="w")
+
+        self.download_progress = ttk.Progressbar(
+            download_progress_frame, orient="horizontal", mode="determinate", length=160
+        )
+        self.download_progress.grid(row=1, column=0, pady=(2, 0), sticky="w")
+
+        self.download_progress_label = ttk.Label(download_progress_frame, text="", font=FONT_LABEL)
+        self.download_progress_label.grid(row=2, column=0, pady=(2, 0), sticky="w")
+
         self.cleanup_button = make_button(pcap_frame, "CLEANUP", RED, RED_H, self.cleanup)
         self.cleanup_button.grid(row=5, column=0, pady=3)
         self.cleanup_button.config(state="disabled")
@@ -341,6 +355,21 @@ class PcapPanel(ttk.LabelFrame):
             self.cleanup_button.config(state="normal")
         app.update_command_status(response)
 
+    @staticmethod
+    def _format_size(num_bytes):
+        size = float(num_bytes)
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+            size /= 1024
+        return f"{size:.1f} GB"
+
+    def _reset_progress_ui(self):
+        self.download_progress["value"] = 0
+        self.download_progress["maximum"] = 100
+        self.download_size_label.config(text="")
+        self.download_progress_label.config(text="")
+
     def download(self):
         app = self.winfo_toplevel()
         if not self.last_pcap_path:
@@ -353,13 +382,52 @@ class PcapPanel(ttk.LabelFrame):
                 app.update_command_status(response)
                 return
 
+        # Kill the capture before pulling the file: reading a pcap tcpdump is
+        # still actively writing to could hand back a truncated/corrupt file.
+        if self.pcap_state == "STARTED":
+            stop_response = app.send_command_to_backend("PCAP STOP")
+            if stop_response.startswith("OK"):
+                self.pcap_state = "STOPPED"
+                self.pcap_status.config(text="Status: stopped", foreground=RED)
+                self.start_button.config(state="disabled")
+            app.update_command_status(stop_response)
+
         target = os.path.join(os.getcwd(), self.last_pcap_path)
 
+        self.download_button.config(state="disabled")
+        self._reset_progress_ui()
+        self.download_progress_label.config(text="Starting download...")
+        self.update_idletasks()
+
+        received = 0
+        total_size = None
         try:
-            reply = app.backend_stub.PcapGet(
-                multiverse_pb2.PcapNameRequest(name=self.last_pcap_path),
-                timeout=GRPC_TIMEOUT_SECONDS,
-            )
+            with open(target, "wb") as out_file:
+                # PcapGet is a server-streaming RPC: the backend kills tcpdump
+                # (belt-and-braces, mirrors the STOP above) and streams the
+                # file back in 64 MB PcapChunk messages instead of one huge
+                # unary reply, so the UI can show real progress as it lands.
+                for chunk in app.backend_stub.PcapGet(
+                    multiverse_pb2.PcapNameRequest(name=self.last_pcap_path),
+                    timeout=None,
+                ):
+                    if total_size is None:
+                        total_size = chunk.total_size
+                        self.download_progress["maximum"] = max(total_size, 1)
+                        self.download_size_label.config(
+                            text=f"File size: {self._format_size(total_size)}"
+                        )
+
+                    out_file.write(chunk.content)
+                    received += len(chunk.content)
+
+                    self.download_progress["value"] = received
+                    pct = (received / total_size * 100) if total_size else 0
+                    self.download_progress_label.config(
+                        text=f"{pct:.0f}%  ({self._format_size(received)} / "
+                        f"{self._format_size(total_size)})"
+                    )
+                    self.update_idletasks()
         except grpc.RpcError as exc:
             detail = exc.details() or str(exc.code())
             if exc.code() in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
@@ -371,48 +439,44 @@ class PcapPanel(ttk.LabelFrame):
                 app.connection_panel.ethernet_button.config(state="normal")
                 app.connection_panel.wifi_button.config(state="normal")
             app.update_command_status(f"ERROR {detail}")
+            self._reset_progress_ui()
+            self.download_button.config(state="normal")
             return
-
-        try:
-            with open(target, "wb") as out_file:
-                out_file.write(reply.content)
         except OSError as exc:
             app.update_command_status(f"ERROR Could not save downloaded PCAP file: {exc}")
+            self._reset_progress_ui()
+            self.download_button.config(state="normal")
             return
 
         self.last_download_path = target
         self.last_download_name = self.last_pcap_path
         if target not in self.downloaded_pcap_paths:
             self.downloaded_pcap_paths.append(target)
+        self.download_progress_label.config(text=f"Done — {self._format_size(received)}")
         app.update_command_status(f"OK Downloaded PCAP to {target}")
+        self.download_button.config(state="normal")
 
     def cleanup(self):
         app = self.winfo_toplevel()
-        if not self.downloaded_pcap_paths and not self.last_download_path and not self.last_pcap_path:
-            app.update_command_status("ERROR No PCAP file is available to clean up")
-            return
 
-        remote_name = self.last_pcap_path or self.last_download_name
-        if remote_name:
-            remote_response = app.send_command_to_backend(f"PCAP DELETE {remote_name}")
-            if not remote_response.startswith("OK"):
-                app.update_command_status(remote_response)
-                return
+        remote_response = app.send_command_to_backend("PCAP DELETE-ALL")
+        if not remote_response.startswith("OK"):
+            app.update_command_status(remote_response)
+            return
 
         removed_any = False
         errors = []
-
-        for download_path in list(self.downloaded_pcap_paths):
+        for fname in os.listdir(os.getcwd()):
+            if ".pcap" not in fname:
+                continue
+            fpath = os.path.join(os.getcwd(), fname)
+            if not os.path.isfile(fpath):
+                continue
             try:
-                if os.path.exists(download_path):
-                    os.remove(download_path)
-                    removed_any = True
+                os.remove(fpath)
+                removed_any = True
             except OSError as exc:
                 errors.append(str(exc))
-
-        if errors:
-            app.update_command_status(f"ERROR Could not clean up PCAP files: {'; '.join(errors)}")
-            return
 
         self.downloaded_pcap_paths = []
         self.last_download_path = ""
@@ -423,7 +487,17 @@ class PcapPanel(ttk.LabelFrame):
         self.start_button.config(state="disabled")
         self.download_button.config(state="disabled")
         self.cleanup_button.config(state="disabled")
-        app.update_command_status("OK PCAP files cleaned up" if removed_any else "OK No PCAP files to clean up")
+        self._reset_progress_ui()
+
+        if errors:
+            app.update_command_status(
+                f"ERROR Could not clean up local PCAP files: {'; '.join(errors)}"
+            )
+            return
+
+        app.update_command_status(
+            "OK All PCAP files cleaned up" if removed_any else remote_response
+        )
 
 
 class Multiverse(tk.Tk):
@@ -581,6 +655,10 @@ class Multiverse(tk.Tk):
                     reply = self.backend_stub.PcapDelete(
                         multiverse_pb2.PcapNameRequest(name=sub_arg),
                         timeout=GRPC_TIMEOUT_SECONDS,
+                    )
+                elif sub == "DELETE-ALL":
+                    reply = self.backend_stub.PcapDeleteAll(
+                        multiverse_pb2.Empty(), timeout=GRPC_TIMEOUT_SECONDS
                     )
                 else:
                     return "ERROR Unknown PCAP subcommand"

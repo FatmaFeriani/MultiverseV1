@@ -12,7 +12,8 @@ service Multiverse {
   rpc PcapStop(Empty) returns (CommandReply);
   rpc PcapSetName(PcapNameRequest) returns (CommandReply);
   rpc PcapDelete(PcapNameRequest) returns (CommandReply);
-  rpc PcapGet(PcapNameRequest) returns (PcapFileReply);
+  rpc PcapDeleteAll(Empty) returns (CommandReply);
+  rpc PcapGet(PcapNameRequest) returns (stream PcapChunk);
 }
 
 message PowerRequest {
@@ -31,9 +32,14 @@ message PcapNameRequest {
   string name = 1;
 }
 
-message PcapFileReply {
+// Streamed piece of a PCAP file. `total_size` is repeated on every chunk
+// (not just the first) so the client can size its progress bar even if it
+// only inspects the last message, and filename lets it validate identity.
+message PcapChunk {
   string filename = 1;
-  bytes content = 2;
+  uint64 total_size = 2;
+  uint64 offset = 3;
+  bytes content = 4;
 }
 
 message Empty {}

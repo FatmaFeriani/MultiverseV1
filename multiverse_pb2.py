@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x10multiverse.proto\x12\nmultiverse\"\x1a\n\x0cPowerRequest\x12\n\n\x02on\x18\x01 \x01(\x08\"\x1b\n\rWakeUpRequest\x12\n\n\x02on\x18\x01 \x01(\x08\"\x1d\n\x0f\x41\x63tiLineRequest\x12\n\n\x02on\x18\x01 \x01(\x08\"\x1f\n\x0fPcapNameRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\"2\n\rPcapFileReply\x12\x10\n\x08\x66ilename\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\x0c\"\x07\n\x05\x45mpty\"+\n\x0c\x43ommandReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2\x95\x04\n\nMultiverse\x12>\n\x08SetPower\x12\x18.multiverse.PowerRequest\x1a\x18.multiverse.CommandReply\x12@\n\tSetWakeUp\x12\x19.multiverse.WakeUpRequest\x1a\x18.multiverse.CommandReply\x12\x44\n\x0bSetActiLine\x12\x1b.multiverse.ActiLineRequest\x1a\x18.multiverse.CommandReply\x12\x38\n\tPcapStart\x12\x11.multiverse.Empty\x1a\x18.multiverse.CommandReply\x12\x37\n\x08PcapStop\x12\x11.multiverse.Empty\x1a\x18.multiverse.CommandReply\x12\x44\n\x0bPcapSetName\x12\x1b.multiverse.PcapNameRequest\x1a\x18.multiverse.CommandReply\x12\x43\n\nPcapDelete\x12\x1b.multiverse.PcapNameRequest\x1a\x18.multiverse.CommandReply\x12\x41\n\x07PcapGet\x12\x1b.multiverse.PcapNameRequest\x1a\x19.multiverse.PcapFileReplyb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x10multiverse.proto\x12\nmultiverse\"\x1a\n\x0cPowerRequest\x12\n\n\x02on\x18\x01 \x01(\x08\"\x1b\n\rWakeUpRequest\x12\n\n\x02on\x18\x01 \x01(\x08\"\x1d\n\x0f\x41\x63tiLineRequest\x12\n\n\x02on\x18\x01 \x01(\x08\"\x1f\n\x0fPcapNameRequest\x12\x0c\n\x04name\x18\x01 \x01(\t\"R\n\tPcapChunk\x12\x10\n\x08\x66ilename\x18\x01 \x01(\t\x12\x12\n\ntotal_size\x18\x02 \x01(\x04\x12\x0e\n\x06offset\x18\x03 \x01(\x04\x12\x0f\n\x07\x63ontent\x18\x04 \x01(\x0c\"\x07\n\x05\x45mpty\"+\n\x0c\x43ommandReply\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2\xd1\x04\n\nMultiverse\x12>\n\x08SetPower\x12\x18.multiverse.PowerRequest\x1a\x18.multiverse.CommandReply\x12@\n\tSetWakeUp\x12\x19.multiverse.WakeUpRequest\x1a\x18.multiverse.CommandReply\x12\x44\n\x0bSetActiLine\x12\x1b.multiverse.ActiLineRequest\x1a\x18.multiverse.CommandReply\x12\x38\n\tPcapStart\x12\x11.multiverse.Empty\x1a\x18.multiverse.CommandReply\x12\x37\n\x08PcapStop\x12\x11.multiverse.Empty\x1a\x18.multiverse.CommandReply\x12\x44\n\x0bPcapSetName\x12\x1b.multiverse.PcapNameRequest\x1a\x18.multiverse.CommandReply\x12\x43\n\nPcapDelete\x12\x1b.multiverse.PcapNameRequest\x1a\x18.multiverse.CommandReply\x12<\n\rPcapDeleteAll\x12\x11.multiverse.Empty\x1a\x18.multiverse.CommandReply\x12?\n\x07PcapGet\x12\x1b.multiverse.PcapNameRequest\x1a\x15.multiverse.PcapChunk0\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -39,12 +39,12 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_ACTILINEREQUEST']._serialized_end=118
   _globals['_PCAPNAMEREQUEST']._serialized_start=120
   _globals['_PCAPNAMEREQUEST']._serialized_end=151
-  _globals['_PCAPFILEREPLY']._serialized_start=153
-  _globals['_PCAPFILEREPLY']._serialized_end=203
-  _globals['_EMPTY']._serialized_start=205
-  _globals['_EMPTY']._serialized_end=212
-  _globals['_COMMANDREPLY']._serialized_start=214
-  _globals['_COMMANDREPLY']._serialized_end=257
-  _globals['_MULTIVERSE']._serialized_start=260
-  _globals['_MULTIVERSE']._serialized_end=793
+  _globals['_PCAPCHUNK']._serialized_start=153
+  _globals['_PCAPCHUNK']._serialized_end=235
+  _globals['_EMPTY']._serialized_start=237
+  _globals['_EMPTY']._serialized_end=244
+  _globals['_COMMANDREPLY']._serialized_start=246
+  _globals['_COMMANDREPLY']._serialized_end=289
+  _globals['_MULTIVERSE']._serialized_start=292
+  _globals['_MULTIVERSE']._serialized_end=885
 # @@protoc_insertion_point(module_scope)

@@ -7,7 +7,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::pin::Pin;
+
 use caps::{CapSet, Capability};
+use futures_core::Stream;
 use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command as TokioCommand};
@@ -21,8 +24,7 @@ pub mod multiverse {
 
 use multiverse::multiverse_server::{Multiverse, MultiverseServer};
 use multiverse::{
-    ActiLineRequest, CommandReply, Empty, PcapFileReply, PcapNameRequest, PowerRequest,
-    WakeUpRequest,
+    ActiLineRequest, CommandReply, Empty, PcapChunk, PcapNameRequest, PowerRequest, WakeUpRequest,
 };
 
 const PCU: &str = "pcu_state.txt";
@@ -33,6 +35,8 @@ const LOG_FILE: &str = "command_log.txt";
 
 const DEFAULT_PCAP_NAME: &str = "capture.pcap";
 const CONFIG_FILE: &str = "config.json";
+
+const PCAP_CHUNK_SIZE: usize = 64 * 1024 * 1024; 
 
 #[derive(Clone, Deserialize)]
 struct AppConfig {
@@ -339,9 +343,6 @@ async fn delete_pcap(state: &Arc<AppState>, name: &str) -> CommandReply {
     }
 }
 
-/// `tcpdump -C ... -W ...` writes rotated captures as `<name>0`,
-/// `<name>1`, and so on.  Prefer an exact file name, but otherwise return
-/// the most recently modified rotated file for the configured capture name.
 async fn resolve_pcap_file(state: &Arc<AppState>, requested_name: &str) -> Result<PathBuf, Status> {
     let configured_name = state.pcap_name.read().await.clone();
     if requested_name != configured_name {
@@ -380,30 +381,141 @@ async fn resolve_pcap_file(state: &Arc<AppState>, requested_name: &str) -> Resul
     })
 }
 
+async fn delete_all_pcaps(state: &Arc<AppState>) -> CommandReply {
+    {
+        let mut child_guard = state.pcap_child.write().await;
+        if let Some(mut child) = child_guard.take() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = write_state(PCAP, "STOP");
+        }
+    }
+
+    let entries = match fs::read_dir(".") {
+        Ok(entries) => entries,
+        Err(err) => {
+            return CommandReply {
+                ok: false,
+                message: format!(
+                    "ERR PCAP DELETE ALL: impossible de lister le repertoire courant: {}",
+                    err
+                ),
+            };
+        }
+    };
+
+    let mut removed = Vec::new();
+    let mut errors = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Rotated slices are the base name with a trailing index
+        // (e.g. "capture.pcap3"), so match on ".pcap" as a substring
+        // rather than requiring the name to end with it.
+        if !name.contains(".pcap") {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(_) => removed.push(name.to_string()),
+            Err(err) => errors.push(format!("{}: {}", name, err)),
+        }
+    }
+
+    *state.pcap_name.write().await = DEFAULT_PCAP_NAME.to_string();
+    *state.pcap_name_set.write().await = false;
+    let _ = write_state(PCAP, "STOP");
+
+    if !errors.is_empty() {
+        return CommandReply {
+            ok: false,
+            message: format!("ERR PCAP DELETE ALL: {}", errors.join("; ")),
+        };
+    }
+
+    CommandReply {
+        ok: true,
+        message: if removed.is_empty() {
+            "OK PCAP DELETE ALL (aucun fichier .pcap trouve)".to_string()
+        } else {
+            format!(
+                "OK PCAP DELETE ALL {} fichier(s) supprime(s): {}",
+                removed.len(),
+                removed.join(", ")
+            )
+        },
+    }
+}
+
 pub struct MultiverseService {
     state: Arc<AppState>,
 }
 
 #[tonic::async_trait]
 impl Multiverse for MultiverseService {
+    type PcapGetStream =
+        Pin<Box<dyn Stream<Item = Result<PcapChunk, Status>> + Send + 'static>>;
+
     async fn pcap_get(
         &self,
         request: Request<PcapNameRequest>,
-    ) -> Result<Response<PcapFileReply>, Status> {
+    ) -> Result<Response<Self::PcapGetStream>, Status> {
         let name = request.into_inner().name;
-        let path = resolve_pcap_file(&self.state, name.trim()).await?;
-        let content = fs::read(&path).map_err(|e| {
-            Status::internal(format!(
-                "PCAP GET: could not read {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
 
-        Ok(Response::new(PcapFileReply {
-            filename: path.to_string_lossy().into_owned(),
-            content,
-        }))
+        // A capture that is still running keeps appending to the file and
+        // holds it open for writing; reading it now would race tcpdump and
+        // could hand back a truncated/corrupt pcap. Kill it first so the
+        // download always sees a finalized file, exactly like pressing STOP.
+        let stop_reply = stop_pcap(&self.state).await;
+        log_and_return("PCAP STOP (auto, before download)".to_string(), stop_reply);
+
+        let path = resolve_pcap_file(&self.state, name.trim()).await?;
+        let filename = path.to_string_lossy().into_owned();
+
+        let file = tokio::fs::File::open(&path).await.map_err(|e| {
+            Status::internal(format!("PCAP GET: could not open {}: {}", path.display(), e))
+        })?;
+        let total_size = file
+            .metadata()
+            .await
+            .map_err(|e| {
+                Status::internal(format!(
+                    "PCAP GET: could not stat {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?
+            .len();
+
+        let mut reader = tokio::io::BufReader::with_capacity(PCAP_CHUNK_SIZE, file);
+
+        let stream = async_stream::try_stream! {
+            let mut offset: u64 = 0;
+            let mut buf = vec![0u8; PCAP_CHUNK_SIZE];
+            loop {
+                let n = reader
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| Status::internal(format!("PCAP GET: read error: {}", e)))?;
+                if n == 0 {
+                    break;
+                }
+                yield PcapChunk {
+                    filename: filename.clone(),
+                    total_size,
+                    offset,
+                    content: buf[..n].to_vec(),
+                };
+                offset += n as u64;
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream) as Self::PcapGetStream))
     }
 
     async fn set_power(
@@ -484,6 +596,17 @@ impl Multiverse for MultiverseService {
         let reply = delete_pcap(&self.state, name.trim()).await;
         Ok(Response::new(log_and_return(
             format!("PCAP DELETE {}", name),
+            reply,
+        )))
+    }
+
+    async fn pcap_delete_all(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<CommandReply>, Status> {
+        let reply = delete_all_pcaps(&self.state).await;
+        Ok(Response::new(log_and_return(
+            "PCAP DELETE ALL".to_string(),
             reply,
         )))
     }
