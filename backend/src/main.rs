@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -34,7 +35,6 @@ const PCAP: &str = "pcap_state.txt";
 const LOG_FILE: &str = "command_log.txt";
 
 const DEFAULT_PCAP_NAME: &str = "capture.pcap";
-const CONFIG_FILE: &str = "config.json";
 
 const PCAP_CHUNK_SIZE: usize = 64 * 1024 * 1024; 
 
@@ -57,22 +57,37 @@ struct CaptureParameters {
     slices: u8,
 }
 
-fn config_path() -> Result<PathBuf, String> {
-    let local = PathBuf::from(CONFIG_FILE);
-    if local.is_file() {
-        return Ok(local);
+fn parse_config_arg() -> Result<String, String> {
+    let args: Vec<String> = env::args().collect();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-c" || arg == "--config" {
+            return iter
+                .next()
+                .cloned()
+                .ok_or_else(|| "l'option -c/--config attend un chemin".to_string());
+        }
+        if let Some(val) = arg.strip_prefix("-c=") {
+            return Ok(val.to_string());
+        }
+        if let Some(val) = arg.strip_prefix("--config=") {
+            return Ok(val.to_string());
+        }
     }
-
-    let parent = PathBuf::from("..").join(CONFIG_FILE);
-    if parent.is_file() {
-        return Ok(parent);
-    }
-
-    Err(format!("{} introuvable", CONFIG_FILE))
+    Err("usage: backend -c <chemin_vers_config.json>".to_string())
 }
 
-fn load_config() -> Result<AppConfig, String> {
-    let path = config_path()?;
+fn config_path(path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!("{} introuvable", path.display()))
+    }
+}
+
+fn load_config(path: &str) -> Result<AppConfig, String> {
+    let path = config_path(path)?;
     let content = fs::read_to_string(&path)
         .map_err(|err| format!("lecture de {} impossible: {}", path.display(), err))?;
     let config: AppConfig = serde_json::from_str(&content)
@@ -415,9 +430,7 @@ async fn delete_all_pcaps(state: &Arc<AppState>) -> CommandReply {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        // Rotated slices are the base name with a trailing index
-        // (e.g. "capture.pcap3"), so match on ".pcap" as a substring
-        // rather than requiring the name to end with it.
+        
         if !name.contains(".pcap") {
             continue;
         }
@@ -467,10 +480,6 @@ impl Multiverse for MultiverseService {
     ) -> Result<Response<Self::PcapGetStream>, Status> {
         let name = request.into_inner().name;
 
-        // A capture that is still running keeps appending to the file and
-        // holds it open for writing; reading it now would race tcpdump and
-        // could hand back a truncated/corrupt pcap. Kill it first so the
-        // download always sees a finalized file, exactly like pressing STOP.
         let stop_reply = stop_pcap(&self.state).await;
         log_and_return("PCAP STOP (auto, before download)".to_string(), stop_reply);
 
@@ -614,8 +623,10 @@ impl Multiverse for MultiverseService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config =
-        load_config().map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let config_path = parse_config_arg()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let config = load_config(&config_path)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
     let ip = config
         .listener
         .ip

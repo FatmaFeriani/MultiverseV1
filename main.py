@@ -14,12 +14,14 @@ BG_DARK = "#1e1e2e"
 BG_PANEL = "#f4f5f7"
 BG_HEADER = "#161622"
 ACCENT = "#7c4dff"
+ACCENT_2 = "#42a5f5"
 GREEN = "#2e7d32"
 GREEN_H = "#388e3c"
 RED = "#c62828"
 RED_H = "#d32f2f"
 GREY = "#546e7a"
 TEXT_DARK = "#212121"
+TRACK_GREY = "#e2e4ea"
 FONT_TITLE = ("Segoe UI", 13, "bold")
 FONT_LABEL = ("Segoe UI", 10)
 FONT_STATUS = ("Segoe UI", 10, "bold")
@@ -35,7 +37,6 @@ DEFAULT_CONFIG = {
 
 
 def load_config():
-    """Load the shared frontend/backend configuration, with safe UI defaults."""
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
             return json.load(config_file)
@@ -44,7 +45,6 @@ def load_config():
 
 
 def listener_config(config):
-    """Return the single listener shared by the backend and frontend."""
     return config["listener"]
 
 
@@ -57,6 +57,120 @@ def make_button(parent, text, color, hover, command, width=14):
     btn.bind("<Enter>", lambda e: btn.config(bg=hover))
     btn.bind("<Leave>", lambda e: btn.config(bg=color))
     return btn
+
+
+def _lerp_color(color_a, color_b, t):
+    """Linearly interpolate between two '#rrggbb' colors."""
+    t = max(0.0, min(1.0, t))
+    a = tuple(int(color_a[i:i + 2], 16) for i in (1, 3, 5))
+    b = tuple(int(color_b[i:i + 2], 16) for i in (1, 3, 5))
+    mixed = tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+    return f"#{mixed[0]:02x}{mixed[1]:02x}{mixed[2]:02x}"
+
+
+class RoundedProgressBar(tk.Canvas):
+
+    def __init__(self, parent, width=220, height=22,
+                 track_color=TRACK_GREY, start_color=ACCENT, end_color=GREEN,
+                 bg=BG_PANEL):
+        super().__init__(parent, width=width, height=height, bg=bg, highlightthickness=0)
+        self.bar_width = width
+        self.bar_height = height
+        self.radius = height / 2
+        self.track_color = track_color
+        self.start_color = start_color
+        self.end_color = end_color
+        self.value = 0
+        self.maximum = 100
+        self._indeterminate_job = None
+        self._indeterminate_pos = 0
+        self._render()
+
+    def set(self, value, maximum=None):
+        self._stop_indeterminate()
+        if maximum is not None:
+            self.maximum = max(maximum, 1)
+        self.value = max(0, min(value, self.maximum))
+        self._render()
+
+    def reset(self):
+        self._stop_indeterminate()
+        self.value = 0
+        self.maximum = 100
+        self._render()
+
+    def start_indeterminate(self):
+        self._stop_indeterminate()
+        self._indeterminate_pos = 0
+        self._animate_indeterminate()
+
+    def _rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
+        radius = max(0, min(radius, (y2 - y1) / 2))
+        points = [
+            x1 + radius, y1,
+            x2 - radius, y1,
+            x2, y1,
+            x2, y1 + radius,
+            x2, y2 - radius,
+            x2, y2,
+            x2 - radius, y2,
+            x1 + radius, y2,
+            x1, y2,
+            x1, y2 - radius,
+            x1, y1 + radius,
+            x1, y1,
+        ]
+        return self.create_polygon(points, smooth=True, **kwargs)
+
+    def _render(self):
+        self.delete("all")
+        w, h, r = self.bar_width, self.bar_height, self.radius
+
+        self._rounded_rect(1, 1, w - 1, h - 1, r, fill=self.track_color, outline="")
+
+        pct = 0.0 if self.maximum <= 0 else self.value / self.maximum
+        pct = max(0.0, min(1.0, pct))
+
+        if pct > 0:
+            fill_w = max(h, (w - 2) * pct)
+            color = _lerp_color(self.start_color, self.end_color, pct)
+            self._rounded_rect(1, 1, 1 + fill_w, h - 1, r, fill=color, outline="")
+          
+            self.create_line(
+                1 + r * 0.4, 3, 1 + fill_w - r * 0.4, 3,
+                fill="#ffffff", width=1, capstyle="round",
+                stipple="gray50",
+            )
+
+        label = f"{int(round(pct * 100))}%"
+        text_color = "white" if pct > 0.42 else TEXT_DARK
+        self.create_text(
+            w / 2, h / 2, text=label, fill=text_color,
+            font=("Segoe UI", 9, "bold"),
+        )
+
+    def _animate_indeterminate(self):
+        self.delete("all")
+        w, h, r = self.bar_width, self.bar_height, self.radius
+        self._rounded_rect(1, 1, w - 1, h - 1, r, fill=self.track_color, outline="")
+
+        chunk = w * 0.28
+        pos = self._indeterminate_pos
+        x1 = pos
+        x2 = pos + chunk
+       
+        x1c = max(1, x1)
+        x2c = min(w - 1, x2)
+        if x2c > x1c:
+            self._rounded_rect(x1c, 1, x2c, h - 1, r, fill=ACCENT_2, outline="")
+
+        self._indeterminate_pos = (pos + 6) % (w + chunk) - chunk
+        self._indeterminate_job = self.after(30, self._animate_indeterminate)
+
+    def _stop_indeterminate(self):
+        if self._indeterminate_job is not None:
+            self.after_cancel(self._indeterminate_job)
+            self._indeterminate_job = None
 
 
 class ConnectionPanel(ttk.LabelFrame):
@@ -284,19 +398,20 @@ class PcapPanel(ttk.LabelFrame):
         self.download_button.grid(row=4, column=0, pady=3)
         self.download_button.config(state="disabled")
 
-        download_progress_frame = ttk.Frame(pcap_frame)
-        download_progress_frame.grid(row=4, column=1, padx=(10, 0), sticky="w")
+        download_progress_frame = ttk.Frame(pcap_frame, style="Card.TFrame")
+        download_progress_frame.grid(row=4, column=1, padx=(14, 0), sticky="w")
 
         self.download_size_label = ttk.Label(download_progress_frame, text="", font=FONT_LABEL)
         self.download_size_label.grid(row=0, column=0, sticky="w")
 
-        self.download_progress = ttk.Progressbar(
-            download_progress_frame, orient="horizontal", mode="determinate", length=160
+        self.download_progress = RoundedProgressBar(
+            download_progress_frame, width=200, height=20,
+            track_color=TRACK_GREY, start_color=ACCENT, end_color=GREEN, bg=BG_PANEL,
         )
-        self.download_progress.grid(row=1, column=0, pady=(2, 0), sticky="w")
+        self.download_progress.grid(row=1, column=0, pady=(4, 0), sticky="w")
 
         self.download_progress_label = ttk.Label(download_progress_frame, text="", font=FONT_LABEL)
-        self.download_progress_label.grid(row=2, column=0, pady=(2, 0), sticky="w")
+        self.download_progress_label.grid(row=2, column=0, pady=(4, 0), sticky="w")
 
         self.cleanup_button = make_button(pcap_frame, "CLEANUP", RED, RED_H, self.cleanup)
         self.cleanup_button.grid(row=5, column=0, pady=3)
@@ -365,8 +480,7 @@ class PcapPanel(ttk.LabelFrame):
         return f"{size:.1f} GB"
 
     def _reset_progress_ui(self):
-        self.download_progress["value"] = 0
-        self.download_progress["maximum"] = 100
+        self.download_progress.reset()
         self.download_size_label.config(text="")
         self.download_progress_label.config(text="")
 
@@ -382,8 +496,6 @@ class PcapPanel(ttk.LabelFrame):
                 app.update_command_status(response)
                 return
 
-        # Kill the capture before pulling the file: reading a pcap tcpdump is
-        # still actively writing to could hand back a truncated/corrupt file.
         if self.pcap_state == "STARTED":
             stop_response = app.send_command_to_backend("PCAP STOP")
             if stop_response.startswith("OK"):
@@ -396,6 +508,7 @@ class PcapPanel(ttk.LabelFrame):
 
         self.download_button.config(state="disabled")
         self._reset_progress_ui()
+        self.download_progress.start_indeterminate()
         self.download_progress_label.config(text="Starting download...")
         self.update_idletasks()
 
@@ -403,17 +516,13 @@ class PcapPanel(ttk.LabelFrame):
         total_size = None
         try:
             with open(target, "wb") as out_file:
-                # PcapGet is a server-streaming RPC: the backend kills tcpdump
-                # (belt-and-braces, mirrors the STOP above) and streams the
-                # file back in 64 MB PcapChunk messages instead of one huge
-                # unary reply, so the UI can show real progress as it lands.
                 for chunk in app.backend_stub.PcapGet(
                     multiverse_pb2.PcapNameRequest(name=self.last_pcap_path),
                     timeout=None,
                 ):
                     if total_size is None:
                         total_size = chunk.total_size
-                        self.download_progress["maximum"] = max(total_size, 1)
+                        self.download_progress.set(0, max(total_size, 1))
                         self.download_size_label.config(
                             text=f"File size: {self._format_size(total_size)}"
                         )
@@ -421,7 +530,7 @@ class PcapPanel(ttk.LabelFrame):
                     out_file.write(chunk.content)
                     received += len(chunk.content)
 
-                    self.download_progress["value"] = received
+                    self.download_progress.set(received)
                     pct = (received / total_size * 100) if total_size else 0
                     self.download_progress_label.config(
                         text=f"{pct:.0f}%  ({self._format_size(received)} / "
